@@ -571,96 +571,97 @@ def cluster(ctx, config):
                     '-p',
                     '/var/lib/ceph/osd/ceph-{id}'.format(id=id_),
                     ])
-            log.info(str(roles_to_journals))
-            log.info(id_)
-            if roles_to_devs.get(id_):
-                dev = roles_to_devs[id_]
-                fs = config.get('fs')
-                package = None
-                mkfs_options = config.get('mkfs_options')
-                mount_options = config.get('mount_options')
-                if fs == 'btrfs':
-                    #package = 'btrfs-tools'
-                    if mount_options is None:
-                        mount_options = ['noatime','user_subvol_rm_allowed']
-                    if mkfs_options is None:
-                        mkfs_options = ['-m', 'single',
-                                        '-l', '32768',
-                                        '-n', '32768']
-                if fs == 'xfs':
-                    #package = 'xfsprogs'
-                    if mount_options is None:
-                        mount_options = ['noatime']
-                    if mkfs_options is None:
-                        mkfs_options = ['-f', '-i', 'size=2048']
-                if fs == 'ext4' or fs == 'ext3':
-                    if mount_options is None:
-                        mount_options = ['noatime','user_xattr']
+            if not config.get('no_mkfs', False):
+                log.info(str(roles_to_journals))
+                log.info(id_)
+                if roles_to_devs.get(id_):
+                    dev = roles_to_devs[id_]
+                    fs = config.get('fs')
+                    package = None
+                    mkfs_options = config.get('mkfs_options')
+                    mount_options = config.get('mount_options')
+                    if fs == 'btrfs':
+                        #package = 'btrfs-tools'
+                        if mount_options is None:
+                            mount_options = ['noatime','user_subvol_rm_allowed']
+                        if mkfs_options is None:
+                            mkfs_options = ['-m', 'single',
+                                            '-l', '32768',
+                                            '-n', '32768']
+                    if fs == 'xfs':
+                        #package = 'xfsprogs'
+                        if mount_options is None:
+                            mount_options = ['noatime']
+                        if mkfs_options is None:
+                            mkfs_options = ['-f', '-i', 'size=2048']
+                    if fs == 'ext4' or fs == 'ext3':
+                        if mount_options is None:
+                            mount_options = ['noatime','user_xattr']
 
-                if mount_options is None:
-                    mount_options = []
-                if mkfs_options is None:
-                    mkfs_options = []
-                mkfs = ['mkfs.%s' % fs] + mkfs_options
-                log.info('%s on %s on %s' % (mkfs, dev, remote))
-                if package is not None:
+                    if mount_options is None:
+                        mount_options = []
+                    if mkfs_options is None:
+                        mkfs_options = []
+                    mkfs = ['mkfs.%s' % fs] + mkfs_options
+                    log.info('%s on %s on %s' % (mkfs, dev, remote))
+                    if package is not None:
+                        remote.run(
+                            args=[
+                                'sudo',
+                                'apt-get', 'install', '-y', package
+                                ],
+                            stdout=StringIO(),
+                            )
+
+                    try:
+                        remote.run(args= ['yes', run.Raw('|')] + ['sudo'] + mkfs + [dev])
+                    except run.CommandFailedError:
+                        # Newer btfs-tools doesn't prompt for overwrite, use -f
+                        if '-f' not in mount_options:
+                            mkfs_options.append('-f')
+                            mkfs = ['mkfs.%s' % fs] + mkfs_options
+                            log.info('%s on %s on %s' % (mkfs, dev, remote))
+                        remote.run(args= ['yes', run.Raw('|')] + ['sudo'] + mkfs + [dev])
+
+                    log.info('mount %s on %s -o %s' % (dev, remote,
+                                                       ','.join(mount_options)))
                     remote.run(
                         args=[
                             'sudo',
-                            'apt-get', 'install', '-y', package
-                            ],
-                        stdout=StringIO(),
+                            'mount',
+                            '-t', fs,
+                            '-o', ','.join(mount_options),
+                            dev,
+                            os.path.join('/var/lib/ceph/osd', 'ceph-{id}'.format(id=id_)),
+                            ]
+                        )
+                    if not remote in ctx.disk_config.remote_to_roles_to_dev_mount_options:
+                        ctx.disk_config.remote_to_roles_to_dev_mount_options[remote] = {}
+                    ctx.disk_config.remote_to_roles_to_dev_mount_options[remote][id_] = mount_options
+                    if not remote in ctx.disk_config.remote_to_roles_to_dev_fstype:
+                        ctx.disk_config.remote_to_roles_to_dev_fstype[remote] = {}
+                    ctx.disk_config.remote_to_roles_to_dev_fstype[remote][id_] = fs
+                    devs_to_clean[remote].append(
+                        os.path.join(
+                            os.path.join('/var/lib/ceph/osd', 'ceph-{id}'.format(id=id_)),
+                            )
                         )
 
-                try:
-                    remote.run(args= ['yes', run.Raw('|')] + ['sudo'] + mkfs + [dev])
-                except run.CommandFailedError:
-                    # Newer btfs-tools doesn't prompt for overwrite, use -f
-                    if '-f' not in mount_options:
-                        mkfs_options.append('-f')
-                        mkfs = ['mkfs.%s' % fs] + mkfs_options
-                        log.info('%s on %s on %s' % (mkfs, dev, remote))
-                    remote.run(args= ['yes', run.Raw('|')] + ['sudo'] + mkfs + [dev])
-
-                log.info('mount %s on %s -o %s' % (dev, remote,
-                                                   ','.join(mount_options)))
+            for id_ in teuthology.roles_of_type(roles_for_host, 'osd'):
                 remote.run(
                     args=[
                         'sudo',
-                        'mount',
-                        '-t', fs,
-                        '-o', ','.join(mount_options),
-                        dev,
-                        os.path.join('/var/lib/ceph/osd', 'ceph-{id}'.format(id=id_)),
-                        ]
+                        'MALLOC_CHECK_=3',
+                        'adjust-ulimits',
+                        'ceph-coverage',
+                        coverage_dir,
+                        'ceph-osd',
+                        '--mkfs',
+                        '--mkkey',
+                        '-i', id_,
+                        '--monmap', '{tdir}/monmap'.format(tdir=testdir),
+                        ],
                     )
-                if not remote in ctx.disk_config.remote_to_roles_to_dev_mount_options:
-                    ctx.disk_config.remote_to_roles_to_dev_mount_options[remote] = {}
-                ctx.disk_config.remote_to_roles_to_dev_mount_options[remote][id_] = mount_options
-                if not remote in ctx.disk_config.remote_to_roles_to_dev_fstype:
-                    ctx.disk_config.remote_to_roles_to_dev_fstype[remote] = {}
-                ctx.disk_config.remote_to_roles_to_dev_fstype[remote][id_] = fs
-                devs_to_clean[remote].append(
-                    os.path.join(
-                        os.path.join('/var/lib/ceph/osd', 'ceph-{id}'.format(id=id_)),
-                        )
-                    )
-
-        for id_ in teuthology.roles_of_type(roles_for_host, 'osd'):
-            remote.run(
-                args=[
-                    'sudo',
-                    'MALLOC_CHECK_=3',
-                    'adjust-ulimits',
-                    'ceph-coverage',
-                    coverage_dir,
-                    'ceph-osd',
-                    '--mkfs',
-                    '--mkkey',
-                    '-i', id_,
-                    '--monmap', '{tdir}/monmap'.format(tdir=testdir),
-                    ],
-                )
 
 
     log.info('Reading keys from all nodes...')
@@ -722,43 +723,43 @@ def cluster(ctx, config):
             )
 
     log.info('Running mkfs on mon nodes...')
-    for remote, roles_for_host in mons.remotes.iteritems():
-        for id_ in teuthology.roles_of_type(roles_for_host, 'mon'):
-            remote.run(
+    if not config.get('no_mkfs', False):
+        for remote, roles_for_host in mons.remotes.iteritems():
+            for id_ in teuthology.roles_of_type(roles_for_host, 'mon'):
+                remote.run(
+                    args=[
+                      'sudo',
+                      'mkdir',
+                      '-p',
+                      '/var/lib/ceph/mon/ceph-{id}'.format(id=id_),
+                      ],
+                    )
+                remote.run(
+                    args=[
+                        'sudo',
+                        'adjust-ulimits',
+                        'ceph-coverage',
+                        coverage_dir,
+                        'ceph-mon',
+                        '--mkfs',
+                        '-i', id_,
+                        '--monmap={tdir}/monmap'.format(tdir=testdir),
+                        '--osdmap={tdir}/osdmap'.format(tdir=testdir),
+                        '--keyring={kpath}'.format(kpath=keyring_path),
+                        ],
+                    )
+
+        run.wait(
+            mons.run(
                 args=[
-                  'sudo',
-                  'mkdir',
-                  '-p',
-                  '/var/lib/ceph/mon/ceph-{id}'.format(id=id_),
-                  ],
-                )
-            remote.run(
-                args=[
-                    'sudo',
-                    'adjust-ulimits',
-                    'ceph-coverage',
-                    coverage_dir,
-                    'ceph-mon',
-                    '--mkfs',
-                    '-i', id_,
-                    '--monmap={tdir}/monmap'.format(tdir=testdir),
-                    '--osdmap={tdir}/osdmap'.format(tdir=testdir),
-                    '--keyring={kpath}'.format(kpath=keyring_path),
+                    'rm',
+                    '--',
+                    '{tdir}/monmap'.format(tdir=testdir),
+                    '{tdir}/osdmap'.format(tdir=testdir),
                     ],
-                )
-
-
-    run.wait(
-        mons.run(
-            args=[
-                'rm',
-                '--',
-                '{tdir}/monmap'.format(tdir=testdir),
-                '{tdir}/osdmap'.format(tdir=testdir),
-                ],
-            wait=False,
-            ),
-        )
+                wait=False,
+                ),
+            )
 
     try:
         yield
@@ -813,37 +814,38 @@ def cluster(ctx, config):
                             )
                         break
 
-        for remote, dirs in devs_to_clean.iteritems():
-            for dir_ in dirs:
-                log.info('Unmounting %s on %s' % (dir_, remote))
-                try:
-                    remote.run(
-                        args=[
-                            'sync',
-                            run.Raw('&&'),
-                            'sudo',
-                            'umount',
-                            '-f',
-                            dir_
-                        ]
-                    )
-                except Exception as e:
-                    remote.run(args=[
-                            'sudo',
-                            run.Raw('PATH=/usr/sbin:$PATH'),
-                            'lsof',
-                            run.Raw(';'),
-                            'ps', 'auxf',
-                            ])
-                    raise e
+        if not config.get('no_mkfs', False):
+            for remote, dirs in devs_to_clean.iteritems():
+                for dir_ in dirs:
+                    log.info('Unmounting %s on %s' % (dir_, remote))
+                    try:
+                        remote.run(
+                            args=[
+                                'sync',
+                                run.Raw('&&'),
+                                'sudo',
+                                'umount',
+                                '-f',
+                                dir_
+                            ]
+                        )
+                    except Exception as e:
+                        remote.run(args=[
+                                'sudo',
+                                run.Raw('PATH=/usr/sbin:$PATH'),
+                                'lsof',
+                                run.Raw(';'),
+                                'ps', 'auxf',
+                                ])
+                        raise e
 
-        if config.get('tmpfs_journal'):
-            log.info('tmpfs journal enabled - unmounting tmpfs at /mnt')
-            for remote, roles_for_host in osds.remotes.iteritems():
-                remote.run(
-                    args=[ 'sudo', 'umount', '-f', '/mnt' ],
-                    check_status=False,
-                )
+            if config.get('tmpfs_journal'):
+                log.info('tmpfs journal enabled - unmounting tmpfs at /mnt')
+                for remote, roles_for_host in osds.remotes.iteritems():
+                    remote.run(
+                        args=[ 'sudo', 'umount', '-f', '/mnt' ],
+                        check_status=False,
+                    )
 
         if ctx.archive is not None and \
            not (ctx.config.get('archive-on-error') and ctx.summary['success']):
